@@ -1,1 +1,372 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+<title>Registro delle Finanze</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { margin: 0; }
+  .serif { font-family: 'Fraunces', serif; }
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+  .hairline { border-color: #3A3240; }
+  input[type=date]::-webkit-calendar-picker-indicator { filter: invert(0.85); }
+  ::selection { background: #D4AF37; color: #1E1A22; }
+  input::placeholder { color: #8B7F94; opacity: 1; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
 
+// --- storage (localStorage, wrapped like the original app's storage API) ---
+const storage = {
+  get: async (key) => {
+    const v = localStorage.getItem(key);
+    return v === null ? null : { key, value: v };
+  },
+  set: async (key, value) => {
+    localStorage.setItem(key, value);
+    return { key, value };
+  },
+};
+
+const ICONS = {
+  entrata: "📈",
+  uscita: "🛍️",
+  debito: "🏛️",
+  donazione: "🤝",
+  investimento: "📊",
+  liquidita: "👛",
+};
+
+const TYPES = {
+  entrata: {
+    label: "Entrata",
+    color: "#4FBF95",
+    categories: { "": ["Stipendio", "Lavoro autonomo", "Passivo", "Quote sociali", "Rendite", "Altro"] },
+  },
+  uscita: {
+    label: "Uscita",
+    color: "#E37D8D",
+    categories: {
+      Casa: ["Fitto/Mutuo", "Utenze", "Manutenzione casa", "Animali domestici"],
+      "Vita quotidiana": ["Cibo", "Igiene", "Abbonamenti"],
+      Personale: ["Palestra", "Cura persona", "Abbigliamento", "Svago", "Associazione", "Bar e ristoranti", "Regali", "Sanitaria"],
+      Auto: ["Carburante", "Tasse auto", "Assicurazione auto", "Manutenzione auto", "Parcheggio"],
+      Amministrativo: ["Tasse", "Agenzia entrate", "Formazione", "Altro"],
+    },
+  },
+  debito: { label: "Debito", color: "#D4AF37", categories: { "": ["Prestiti", "Mutui", "Rateizzi"] } },
+  donazione: { label: "Donazione", color: "#CF75A0", categories: { "": ["Enti benefici", "Senza fissa dimora", "Altro"] } },
+  investimento: { label: "Investimento", color: "#7B8AE0", categories: { "": ["P.A.C.", "Azioni", "Obbligazioni", "Quote sociali", "Altro"] } },
+  liquidita: { label: "Liquidità", color: "#45BFB8", categories: { "": ["Cash", "Oro", "Argento"] } },
+};
+
+const TYPE_ORDER = ["entrata", "uscita", "debito", "donazione", "investimento", "liquidita"];
+
+function fmt(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString("it-IT", { style: "currency", currency: "EUR" });
+}
+function monthKey(dateStr) { return (dateStr || "").slice(0, 7); }
+function monthLabel(key) {
+  if (!key) return "";
+  const [y, m] = key.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("it-IT", { month: "long", year: "numeric" });
+}
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+function BudgetLedger() {
+  const [loaded, setLoaded] = useState(false);
+  const [transactions, setTransactions] = useState([]);
+  const [settings, setSettings] = useState({ donazioniPct: 10, investimentiPct: 10, liquiditaTarget: 200 });
+  const [currentMonth, setCurrentMonth] = useState(monthKey(todayStr()));
+  const [showSettings, setShowSettings] = useState(false);
+  const [error, setError] = useState("");
+
+  const [form, setForm] = useState({
+    date: todayStr(),
+    type: "uscita",
+    category: TYPES.uscita.categories["Vita quotidiana"][0],
+    amount: "",
+    note: "",
+  });
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const tx = await storage.get("transactions");
+        if (tx) setTransactions(JSON.parse(tx.value));
+      } catch (e) {}
+      try {
+        const s = await storage.get("settings");
+        if (s) setSettings(JSON.parse(s.value));
+      } catch (e) {}
+      setLoaded(true);
+    })();
+  }, []);
+
+  const persist = useCallback(async (next) => {
+    setTransactions(next);
+    try { await storage.set("transactions", JSON.stringify(next)); }
+    catch (e) { setError("Impossibile salvare i dati. Riprova."); }
+  }, []);
+
+  const persistSettings = useCallback(async (next) => {
+    setSettings(next);
+    try { await storage.set("settings", JSON.stringify(next)); }
+    catch (e) { setError("Impossibile salvare le impostazioni."); }
+  }, []);
+
+  const addTransaction = () => {
+    const amt = parseFloat(String(form.amount).replace(",", "."));
+    if (!form.date || !amt || amt <= 0) { setError("Inserisci una data e un importo valido."); return; }
+    setError("");
+    const t = { id: uid(), date: form.date, type: form.type, category: form.category, amount: amt, note: form.note.trim() };
+    const next = [t, ...transactions].sort((a, b) => (a.date < b.date ? 1 : -1));
+    persist(next);
+    setForm((f) => ({ ...f, amount: "", note: "" }));
+  };
+
+  const removeTransaction = (id) => persist(transactions.filter((t) => t.id !== id));
+
+  const monthKeys = useMemo(() => {
+    const set = new Set(transactions.map((t) => monthKey(t.date)));
+    set.add(currentMonth);
+    return Array.from(set).sort();
+  }, [transactions, currentMonth]);
+
+  const shiftMonth = (delta) => {
+    const [y, m] = currentMonth.split("-").map(Number);
+    const d = new Date(y, m - 1 + delta, 1);
+    setCurrentMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  };
+
+  const monthTx = useMemo(() => transactions.filter((t) => monthKey(t.date) === currentMonth), [transactions, currentMonth]);
+
+  const totals = useMemo(() => {
+    const byType = {}, byTypeCategory = {};
+    TYPE_ORDER.forEach((t) => { byType[t] = 0; byTypeCategory[t] = {}; });
+    monthTx.forEach((t) => {
+      byType[t.type] = (byType[t.type] || 0) + t.amount;
+      byTypeCategory[t.type][t.category] = (byTypeCategory[t.type][t.category] || 0) + t.amount;
+    });
+    return { byType, byTypeCategory };
+  }, [monthTx]);
+
+  const resta = totals.byType.entrata - totals.byType.uscita - totals.byType.debito - totals.byType.donazione - totals.byType.investimento - totals.byType.liquidita;
+  const restaDaDonare = Math.max(0, (totals.byType.entrata * settings.donazioniPct) / 100 - totals.byType.donazione);
+  const restaDaInvestire = Math.max(0, (totals.byType.entrata * settings.investimentiPct) / 100 - totals.byType.investimento);
+  const restaLiquidita = Math.max(0, settings.liquiditaTarget - totals.byType.liquidita);
+
+  const patrimonio = useMemo(() => {
+    let sum = 0;
+    monthKeys.filter((k) => k <= currentMonth).forEach((k) => {
+      const tx = transactions.filter((t) => monthKey(t.date) === k);
+      const by = {}; TYPE_ORDER.forEach((t) => (by[t] = 0));
+      tx.forEach((t) => (by[t.type] = (by[t.type] || 0) + t.amount));
+      const monthResta = by.entrata - by.uscita - by.debito - by.donazione - by.investimento - by.liquidita;
+      sum += by.investimento + by.liquidita + monthResta;
+    });
+    return sum;
+  }, [transactions, monthKeys, currentMonth]);
+
+  const inOrdine = resta >= 0;
+
+  useEffect(() => {
+    const cats = Object.values(TYPES[form.type].categories).flat();
+    if (!cats.includes(form.category)) setForm((f) => ({ ...f, category: cats[0] }));
+  }, [form.type]);
+
+  if (!loaded) {
+    return (
+      <div style={{ fontFamily: "'IBM Plex Sans', sans-serif" }} className="min-h-screen flex items-center justify-center bg-[#1E1A22] text-[#EDE6E9]">
+        Caricamento registro…
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen w-full" style={{ background: "#1E1A22", fontFamily: "'IBM Plex Sans', sans-serif", color: "#E5DEE8" }}>
+      <header className="border-b-2 hairline px-5 pt-6 pb-4 sm:px-8">
+        <div className="max-w-3xl mx-auto flex items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 text-[#D4AF37] text-xs tracking-[0.2em] uppercase mono mb-1">
+              ✒️ Ordine · Giustizia · Controllo
+            </div>
+            <h1 className="serif text-2xl sm:text-3xl font-semibold text-[#EDE6E9] leading-tight">Registro delle Finanze</h1>
+          </div>
+          <button onClick={() => setShowSettings((s) => !s)}
+            className="p-2 rounded-full border-2 hairline text-[#EDE6E9] hover:bg-[#EDE6E9] hover:text-[#1E1A22] transition-colors shrink-0">
+            ⚙️
+          </button>
+        </div>
+        <div className="max-w-3xl mx-auto mt-5 flex items-center justify-between">
+          <button onClick={() => shiftMonth(-1)} className="p-1.5 rounded-full border hairline hover:bg-[#2A2430]/70">‹</button>
+          <span className="serif text-lg capitalize text-[#EDE6E9]">{monthLabel(currentMonth)}</span>
+          <button onClick={() => shiftMonth(1)} className="p-1.5 rounded-full border hairline hover:bg-[#2A2430]/70">›</button>
+        </div>
+      </header>
+
+      {showSettings && (
+        <div className="max-w-3xl mx-auto px-5 sm:px-8 pt-5">
+          <div className="border-2 hairline rounded-lg p-4 bg-[#2A2430]/60 relative">
+            <button onClick={() => setShowSettings(false)} className="absolute top-3 right-3 text-[#A79AAE]">✕</button>
+            <h2 className="serif text-base text-[#EDE6E9] mb-3">Obiettivi mensili</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[#8B7F94]">% entrate da donare</span>
+                <input type="number" className="mono border hairline rounded px-2 py-1.5 bg-[#241F2B] text-[#E5DEE8]" value={settings.donazioniPct}
+                  onChange={(e) => persistSettings({ ...settings, donazioniPct: parseFloat(e.target.value) || 0 })} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[#8B7F94]">% entrate da investire</span>
+                <input type="number" className="mono border hairline rounded px-2 py-1.5 bg-[#241F2B] text-[#E5DEE8]" value={settings.investimentiPct}
+                  onChange={(e) => persistSettings({ ...settings, investimentiPct: parseFloat(e.target.value) || 0 })} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-[#8B7F94]">Target liquidità (€/mese)</span>
+                <input type="number" className="mono border hairline rounded px-2 py-1.5 bg-[#241F2B] text-[#E5DEE8]" value={settings.liquiditaTarget}
+                  onChange={(e) => persistSettings({ ...settings, liquiditaTarget: parseFloat(e.target.value) || 0 })} />
+              </label>
+            </div>
+            <p className="text-xs text-[#8B7F94] mt-3">Questi obiettivi determinano quanto "resta da donare / investire" e il target di liquidità mostrati sotto.</p>
+          </div>
+        </div>
+      )}
+
+      <main className="max-w-3xl mx-auto px-5 sm:px-8 py-6 grid gap-6">
+        <section className="border-2 hairline rounded-lg p-4 bg-[#2A2430]/70">
+          <h2 className="serif text-base text-[#EDE6E9] mb-3">Aggiungi movimento</h2>
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5">
+            <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })}
+              className="col-span-2 sm:col-span-1 mono text-sm border hairline rounded px-2 py-2 bg-[#241F2B] text-[#E5DEE8]" />
+            <div className="relative">
+              <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-xs">{ICONS[form.type]}</span>
+              <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}
+                className="w-full text-sm border hairline rounded pl-7 pr-2 py-2 bg-[#241F2B] text-[#E5DEE8]">
+                {TYPE_ORDER.map((t) => <option key={t} value={t}>{TYPES[t].label}</option>)}
+              </select>
+            </div>
+            <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}
+              className="text-sm border hairline rounded px-2 py-2 bg-[#241F2B] text-[#E5DEE8] col-span-2 sm:col-span-1">
+              {Object.entries(TYPES[form.type].categories).map(([group, cats]) =>
+                group ? (
+                  <optgroup key={group} label={group}>
+                    {cats.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </optgroup>
+                ) : cats.map((c) => <option key={c} value={c}>{c}</option>)
+              )}
+            </select>
+            <input type="number" step="0.01" placeholder="Importo €" value={form.amount}
+              onChange={(e) => setForm({ ...form, amount: e.target.value })}
+              className="mono text-sm border hairline rounded px-2 py-2 bg-[#241F2B] text-[#E5DEE8]" />
+            <input type="text" placeholder="Nota (opzionale)" value={form.note}
+              onChange={(e) => setForm({ ...form, note: e.target.value })}
+              className="text-sm border hairline rounded px-2 py-2 bg-[#241F2B] text-[#E5DEE8] col-span-2 sm:col-span-1" />
+            <button onClick={addTransaction}
+              className="flex items-center justify-center gap-1.5 text-sm rounded px-3 py-2 bg-[#C9A227] text-[#1E1A22] hover:bg-[#B8931A] transition-colors col-span-2 sm:col-span-1 font-medium">
+              + Aggiungi
+            </button>
+          </div>
+          {error && <p className="text-xs text-[#E37D8D] mt-2">{error}</p>}
+        </section>
+
+        <section className="flex flex-col sm:flex-row gap-5 items-center border-2 hairline rounded-lg p-5 bg-[#2A2430]/70">
+          <div className="mono shrink-0 w-24 h-24 rounded-full border-[3px] flex flex-col items-center justify-center text-center leading-tight rotate-[-6deg]"
+            style={{ borderColor: inOrdine ? "#4FBF95" : "#E37D8D", color: inOrdine ? "#4FBF95" : "#E37D8D" }}>
+            <span className="text-[9px] tracking-wider uppercase">{inOrdine ? "In Ordine" : "Fuori Ordine"}</span>
+            <span className="text-sm font-semibold mt-1">{fmt(resta)}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm flex-1 w-full">
+            <div className="flex justify-between border-b hairline pb-1"><span className="flex items-center gap-1.5 text-[#8B7F94]">{ICONS.entrata} Entrate</span><span className="mono">{fmt(totals.byType.entrata)}</span></div>
+            <div className="flex justify-between border-b hairline pb-1"><span className="flex items-center gap-1.5 text-[#8B7F94]">{ICONS.uscita} Uscite</span><span className="mono">{fmt(totals.byType.uscita)}</span></div>
+            <div className="flex justify-between border-b hairline pb-1"><span className="flex items-center gap-1.5 text-[#8B7F94]">{ICONS.debito} Debiti</span><span className="mono">{fmt(totals.byType.debito)}</span></div>
+            <div className="flex justify-between border-b hairline pb-1"><span className="text-[#8B7F94]">Resta (saldo)</span><span className="mono font-semibold">{fmt(resta)}</span></div>
+            <div className="flex justify-between border-b hairline pb-1"><span className="text-[#8B7F94]">Patrimonio cumulativo</span><span className="mono font-semibold">{fmt(patrimonio)}</span></div>
+          </div>
+        </section>
+
+        <section className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {[
+            { key: "donazione", label: "Donazioni", tot: totals.byType.donazione, resta: restaDaDonare },
+            { key: "investimento", label: "Investimenti", tot: totals.byType.investimento, resta: restaDaInvestire },
+            { key: "liquidita", label: "Liquidità", tot: totals.byType.liquidita, resta: restaLiquidita },
+          ].map((b) => (
+            <div key={b.label} className="border-2 hairline rounded-lg p-3.5 bg-[#2A2430]/70">
+              <div className="flex items-center gap-1.5 text-xs uppercase tracking-wide mono mb-1" style={{ color: TYPES[b.key].color }}>
+                {ICONS[b.key]} {b.label}
+              </div>
+              <div className="serif text-xl text-[#EDE6E9]">{fmt(b.tot)}</div>
+              <div className="text-xs text-[#8B7F94] mt-1">resta da destinare: <span className="mono">{fmt(b.resta)}</span></div>
+            </div>
+          ))}
+        </section>
+
+        <section className="border-2 hairline rounded-lg p-4 bg-[#2A2430]/70">
+          <h2 className="serif text-base text-[#EDE6E9] mb-3">Dettaglio per categoria</h2>
+          <div className="grid gap-4">
+            {TYPE_ORDER.map((t) => {
+              const cats = totals.byTypeCategory[t];
+              const entries = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+              if (entries.length === 0) return null;
+              return (
+                <div key={t}>
+                  <div className="flex items-center gap-1.5 text-xs uppercase tracking-wide mono mb-1.5" style={{ color: TYPES[t].color }}>
+                    {ICONS[t]} {TYPES[t].label}
+                  </div>
+                  <div className="grid gap-1">
+                    {entries.map(([cat, amt]) => (
+                      <div key={cat} className="flex justify-between text-sm border-b hairline pb-1">
+                        <span>{cat}</span><span className="mono">{fmt(amt)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+            {monthTx.length === 0 && <p className="text-sm text-[#8B7F94]">Nessun movimento registrato per questo mese.</p>}
+          </div>
+        </section>
+
+        <section className="border-2 hairline rounded-lg p-4 bg-[#2A2430]/70">
+          <h2 className="serif text-base text-[#EDE6E9] mb-3">Movimenti del mese</h2>
+          <div className="grid gap-1.5 max-h-96 overflow-y-auto pr-1">
+            {monthTx.map((t) => (
+              <div key={t.id} className="flex items-center justify-between text-sm border-b hairline py-1.5 gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="mono text-xs text-[#8B7F94] shrink-0">{t.date.slice(8, 10)}/{t.date.slice(5, 7)}</span>
+                  <span className="w-5 h-5 rounded-full shrink-0 flex items-center justify-center text-[10px]" style={{ background: `${TYPES[t.type].color}22` }}>
+                    {ICONS[t.type]}
+                  </span>
+                  <span className="truncate">{t.category}{t.note ? ` — ${t.note}` : ""}</span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="mono">{fmt(t.amount)}</span>
+                  <button onClick={() => removeTransaction(t.id)} className="text-[#8B7F94] hover:text-[#E37D8D]">✕</button>
+                </div>
+              </div>
+            ))}
+            {monthTx.length === 0 && <p className="text-sm text-[#8B7F94]">Vuoto per ora — aggiungi il primo movimento sopra.</p>}
+          </div>
+        </section>
+      </main>
+
+      <footer className="max-w-3xl mx-auto px-5 sm:px-8 pb-8 text-xs text-[#8B7F94]">
+        I dati sono salvati automaticamente in questo browser (rimangono solo su questo telefono/computer).
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<BudgetLedger />);
+</script>
+</body>
+</html>
